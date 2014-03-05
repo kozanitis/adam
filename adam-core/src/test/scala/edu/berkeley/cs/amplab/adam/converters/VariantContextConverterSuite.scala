@@ -15,174 +15,127 @@
  */
 package edu.berkeley.cs.amplab.adam.converters
 
-import org.broadinstitute.variant.variantcontext.{Allele, VariantContextBuilder, GenotypeBuilder}
-import edu.berkeley.cs.amplab.adam.avro.VariantType
-import edu.berkeley.cs.amplab.adam.rdd.AdamContext._
+import scala.collection.JavaConversions._
 import org.scalatest.FunSuite
+import org.broadinstitute.variant.variantcontext.{GenotypeType, Allele, VariantContextBuilder, GenotypeBuilder}
+import java.lang.Integer
+import edu.berkeley.cs.amplab.adam.models.{ADAMVariantContext, SequenceRecord, SequenceDictionary}
+import edu.berkeley.cs.amplab.adam.avro._
+import scala.Some
 
 class VariantContextConverterSuite extends FunSuite {
+  val dictionary = SequenceDictionary(SequenceRecord(1, "chr1", 249250621, "file://ucsc.hg19.fasta", "1b22b98cdeb4a9304cb5d48026a85128"))
 
-  test("Test variant unpacking from simple variant context with 1 allele") {
-    val Aref = Allele.create("A", true)
+  def gatkSNVBuilder: VariantContextBuilder = new VariantContextBuilder()
+    .alleles(List(Allele.create("A",true), Allele.create("T")))
+    .start(1L)
+    .stop(1L)
+    .chr("chr1")
 
-    // make variant at locus position 1 with allele "A" which is reference, and passes filters
-    val vc = new VariantContextBuilder().alleles(List(Aref))
-      .id("MyID")
-      .passFilters()
-      .start(1L)
-      .stop(1L)
-      .chr("A")
-      .make()
+  def adamSNVBuilder: ADAMVariant.Builder = ADAMVariant.newBuilder()
+    .setContig(ADAMContig.newBuilder().setContigId(1).setContigName("chr1").build)
+    .setPosition(0L)
+    .setReferenceAllele("A")
+    .setVariantAllele("T")
 
-    val converter = new VariantContextConverter
+  test("Convert GATK site-only SNV to ADAM") {
+    val converter = new VariantContextConverter(Some(dictionary))
 
-    val adamVariants = converter.convertVariants(vc)
-    val variant = adamVariants.head
+    val adamVCs = converter.convert(gatkSNVBuilder.make)
+    assert(adamVCs.length === 1)
+    val adamVC = adamVCs.head
 
-    assert(adamVariants.length === 1)
+    assert(adamVC.genotypes.length === 0)
+
+    val variant = adamVC.variant
+
+    val contig = variant.getContig
+    assert(contig.getContigName === "chr1")
+    assert(contig.getContigLength === 249250621)
+    assert(contig.getReferenceURL === "file://ucsc.hg19.fasta")
+    assert(contig.getContigMD5 === "1b22b98cdeb4a9304cb5d48026a85128")
+
     assert(variant.getReferenceAllele === "A")
-    assert(variant.getIsReference)
-    assert(variant.getId === "MyID")
-    assert(variant.getFiltersRun)
-    assert(variant.getFilters === null)
     assert(variant.getPosition === 0L)
   }
 
-  test("Test variant unpacking from context with reference allele and SNP") {
-    val Aref = Allele.create("A", true)
-    val Tsnp = Allele.create("T", false)
+  test("Convert GATK SNV w/ genotypes w/ phase information to ADAM") {
+    val vcb = gatkSNVBuilder
 
-    // make variant at locus position 1 with allele "A" which is reference
-    val vc = new VariantContextBuilder().alleles(List(Aref, Tsnp))
-      .id("MyID")
-      .passFilters()
-      .start(1L)
-      .stop(1L)
-      .chr("A")
-      .make()
+    val genotypeAttributes = Map[String, Object]("PQ" -> new Integer(50), "PS" -> new Integer(1))
+    val vc = vcb.genotypes(GenotypeBuilder.create("NA12878", vcb.getAlleles(), genotypeAttributes)).make()
 
-    val converter = new VariantContextConverter
+    val converter = new VariantContextConverter(Some(dictionary))
 
-    val adamVariants = converter.convertVariants(vc)
-    val ref = adamVariants(1)
-    val variant = adamVariants(0)
+    val adamVCs = converter.convert(vc)
+    assert(adamVCs.length === 1)
 
-    assert(adamVariants.length === 2)
-    assert(ref.getReferenceAllele === "A")
-    assert(ref.getIsReference)
-    assert(ref.getId === "MyID")
-    assert(ref.getFiltersRun)
-    assert(ref.getFilters === null)
-    assert(ref.getPosition === 0L)
-    assert(ref.getVariantType === VariantType.SNP)
-    assert(variant.getReferenceAllele === "A")
-    assert(!variant.getIsReference)
-    assert(variant.getVariant === "T")
-    assert(variant.getId === "MyID")
-    assert(variant.getFiltersRun)
-    assert(variant.getFilters === null)
-    assert(variant.getPosition === 0L)
-    assert(variant.getVariantType === VariantType.SNP)
+    val adamGTs = adamVCs.flatMap(_.genotypes)
+    assert(adamGTs.length === 1)
+    val adamGT = adamGTs.head
+    assert(adamGT.getAlleles.sameElements(List(ADAMGenotypeAllele.Ref, ADAMGenotypeAllele.Alt)))
+    assert(adamGT.getPhaseSetId === 1)
+    assert(adamGT.getPhaseQuality === 50)
   }
 
-  test("Test variant unpacking from simple variant context with 1 allele and 1 genotype") {
-    val Aref = Allele.create("A", true)
-    val g = GenotypeBuilder.create("mySample", List(Aref))
+  test("Convert GATK PASSing SNV to ADAM") {
+    val vcb = gatkSNVBuilder
+    vcb.genotypes(GenotypeBuilder.create("NA12878", vcb.getAlleles))
+    vcb.passFilters()
 
-    // make variant at locus position 1 with allele "A" which is reference, and passes filters
-    val vc = new VariantContextBuilder().alleles(List(Aref))
-      .id("MyID")
-      .passFilters()
-      .start(1L)
-      .stop(1L)
-      .chr("A")
-      .genotypes(List(g))
-      .make()
+    val converter = new VariantContextConverter(Some(dictionary))
 
-    val converter = new VariantContextConverter
+    val adamVCs = converter.convert(vcb.make)
+    val adamGT = adamVCs.flatMap(_.genotypes).head
 
-    val adamVariants = converter.convertVariants(vc)
-    val variant = adamVariants.head
-
-    assert(adamVariants.length === 1)
-    assert(variant.getReferenceAllele === "A")
-    assert(variant.getIsReference)
-    assert(variant.getId === "MyID")
-    assert(variant.getFiltersRun)
-    assert(variant.getFilters === null)
-    assert(variant.getPosition === 0L)
-
-    val adamGenotypes = converter.convertGenotypes(vc)
-    val genotype = adamGenotypes.head
-
-    assert(adamGenotypes.length === 1)
-    assert(genotype.getIsReference)
-    assert(genotype.getAllele === "A")
-    assert(genotype.getPosition === 0L)
+    assert(adamGT.getVariantCallingAnnotations.getVariantIsPassing === true)
   }
 
-  test("Test variant unpacking from simple variant context with 1 allele and 1 diploid genotype") {
-    val Aref = Allele.create("A", true)
-    val g = GenotypeBuilder.create("mySample", List(Aref, Aref))
+  test("Convert GATK non-PASSing SNV to ADAM") {
+    val vcb = gatkSNVBuilder
+    vcb.genotypes(GenotypeBuilder.create("NA12878", vcb.getAlleles))
+    vcb.filter("LowMQ")
 
-    // make variant at locus position 1 with allele "A" which is reference, and passes filters
-    val vc = new VariantContextBuilder().alleles(List(Aref))
-      .id("MyID")
-      .passFilters()
-      .start(1L)
-      .stop(1L)
-      .chr("A")
-      .genotypes(List(g))
-      .make()
+    val converter = new VariantContextConverter(Some(dictionary))
 
-    val converter = new VariantContextConverter
+    val adamVCs = converter.convert(vcb.make)
+    val adamGT = adamVCs.flatMap(_.genotypes).head
 
-    val adamVariants = converter.convertVariants(vc)
-    val variant = adamVariants.head
+    val annotations = adamGT.getVariantCallingAnnotations
+    assert(annotations.getVariantIsPassing === false)
+    assert(annotations.getVariantFilters.sameElements(List("LowMQ")))
+  }
+  
+  test("Convert ADAM site-only SNV to GATK") {
+    val vc = ADAMVariantContext(adamSNVBuilder.build)
 
-    assert(adamVariants.length === 1)
-    assert(variant.getReferenceAllele === "A")
-    assert(variant.getIsReference)
-    assert(variant.getId === "MyID")
-    assert(variant.getFiltersRun)
-    assert(variant.getFilters === null)
-    assert(variant.getPosition === 0L)
+    val converter = new VariantContextConverter(Some(dictionary))
 
-    val adamGenotypes = converter.convertGenotypes(vc)
-
-    assert(adamGenotypes.length === 2)
-    assert(adamGenotypes.forall(_.getIsReference))
-    assert(adamGenotypes.forall(_.getAllele == "A"))
-    assert(adamGenotypes.forall(_.getPosition == 0L))
+    val gatkVC = converter.convert(vc)
+    assert(gatkVC.getChr === "chr1")
+    assert(gatkVC.getStart === 1)
+    assert(gatkVC.getEnd === 1)
+    assert(gatkVC.getReference === Allele.create("A", true))
+    assert(gatkVC.getAlternateAlleles.sameElements(List(Allele.create("T"))))
+    assert(!gatkVC.hasLog10PError)
+    assert(!gatkVC.hasID)
+    assert(!gatkVC.filtersWereApplied)
   }
 
-  test("Test VCF->ADAM->VCF conversion with 1 allele and 1 genotype") {
-    val Aref = Allele.create("A", true)
-    val g = GenotypeBuilder.create("mySample", List(Aref))
+  test("Convert ADAM SNV w/ genotypes to GATK") {
+    val variant = adamSNVBuilder.build
+    val genotype = ADAMGenotype.newBuilder
+      .setVariant(variant)
+      .setSampleId("NA12878")
+      .setAlleles(List(ADAMGenotypeAllele.Ref, ADAMGenotypeAllele.Alt))
+      .build
 
-    // make variant at locus position 1 with allele "A" which is reference, and passes filters
-    val vc = new VariantContextBuilder().alleles(List(Aref))
-      .id("MyID")
-      .passFilters()
-      .start(1L)
-      .stop(1L)
-      .chr("A")
-      .genotypes(List(g))
-      .make()
+    val converter = new VariantContextConverter(Some(dictionary))
 
-    val converter = new VariantContextConverter
-
-    val adamVC = converter.convert(vc)
-
-    assert(adamVC.position === 0L)
-    assert(adamVC.variants.length === 1)
-    assert(adamVC.genotypes.length === 1)
-
-    val vcfVC = converter.convert(adamVC)
-
-    assert(vcfVC.hasSameAllelesAs(vc))
-    assert(vcfVC.getStart == vc.getStart)
-    assert(vcfVC.getEnd == vc.getEnd)
+    val gatkVC = converter.convert(ADAMVariantContext(variant, Seq(genotype)))
+    assert(gatkVC.getNSamples === 1)
+    assert(gatkVC.hasGenotype("NA12878"))
+    val gatkGT = gatkVC.getGenotype("NA12878")
+    assert(gatkGT.getType === GenotypeType.HET)
   }
-
 }

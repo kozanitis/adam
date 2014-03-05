@@ -15,33 +15,39 @@
  */
 package edu.berkeley.cs.amplab.adam.rdd
 
-import edu.berkeley.cs.amplab.adam.avro.{ADAMPileup, ADAMRecord, ADAMGenotype, ADAMVariant, ADAMVariantDomain}
-import parquet.hadoop.ParquetInputFormat
-import parquet.avro.{AvroParquetInputFormat, AvroReadSupport}
-import parquet.hadoop.util.ContextUtil
-import org.apache.hadoop.mapreduce.Job
-import parquet.filter.UnboundRecordFilter
+import edu.berkeley.cs.amplab.adam.avro.{ADAMPileup, 
+                                         ADAMRecord,
+                                         ADAMNucleotideContig}
+import edu.berkeley.cs.amplab.adam.converters.SAMRecordConverter
+import edu.berkeley.cs.amplab.adam.models._
+import edu.berkeley.cs.amplab.adam.models.ADAMRod
+import edu.berkeley.cs.amplab.adam.projections.{ADAMRecordField,
+                                                Projection, 
+                                                ADAMNucleotideContigField}
+import edu.berkeley.cs.amplab.adam.rich.RichADAMRecord
+import edu.berkeley.cs.amplab.adam.rich.RichRDDReferenceRecords._
+import edu.berkeley.cs.amplab.adam.serialization.AdamKryoProperties
+import fi.tkk.ics.hadoop.bam.{SAMRecordWritable, AnySAMInputFormat, VariantContextWritable, VCFInputFormat}
+import fi.tkk.ics.hadoop.bam.util.{SAMHeaderReader, VCFHeaderReader, WrapSeekable}
+import java.util.regex.Pattern
+import net.sf.samtools.SAMFileHeader
+import org.apache.hadoop.fs.FileSystem
 import org.apache.avro.Schema
 import org.apache.avro.specific.SpecificRecord
-import edu.berkeley.cs.amplab.adam.rich.{RichRDDReferenceRecords, RichADAMRecord}
-import fi.tkk.ics.hadoop.bam.{SAMRecordWritable, AnySAMInputFormat, VariantContextWritable, VCFInputFormat}
+import org.apache.hadoop.fs.Path
 import org.apache.hadoop.io.LongWritable
-import org.apache.spark.rdd.RDD
+import org.apache.hadoop.mapreduce.Job
 import org.apache.spark.{Logging, SparkContext}
-import scala.collection.JavaConversions._
-import edu.berkeley.cs.amplab.adam.models._
-import org.apache.hadoop.fs.{FileSystem, Path}
-import fi.tkk.ics.hadoop.bam.util.SAMHeaderReader
-import edu.berkeley.cs.amplab.adam.projections.{ADAMRecordField, Projection}
-import edu.berkeley.cs.amplab.adam.projections.ADAMVariantAnnotations
-import edu.berkeley.cs.amplab.adam.converters.{SAMRecordConverter, VariantContextConverter}
-import edu.berkeley.cs.amplab.adam.rich.RichRDDReferenceRecords._
-
-import scala.collection.Map
+import org.apache.spark.rdd.RDD
+import org.apache.spark.scheduler.StatsReportListener
+import parquet.avro.{AvroParquetInputFormat, AvroReadSupport}
+import parquet.filter.UnboundRecordFilter
+import parquet.hadoop.ParquetInputFormat
+import parquet.hadoop.util.ContextUtil
 import scala.Some
-import edu.berkeley.cs.amplab.adam.models.ADAMRod
-import net.sf.samtools.SAMFileHeader
-import java.util.regex.Pattern
+import scala.collection.JavaConversions._
+import scala.collection.Map
+
 
 object AdamContext {
   // Add ADAM Spark context methods
@@ -53,17 +59,14 @@ object AdamContext {
   // Add methods specific to the ADAMPileup RDDs
   implicit def rddToAdamPileupRDD(rdd: RDD[ADAMPileup]) = new AdamPileupRDDFunctions(rdd)
 
-  // Add methods specific to the ADAMGenotype RDDs
-  implicit def rddToAdamGenotypeRDD(rdd: RDD[ADAMGenotype]) = new AdamGenotypeRDDFunctions(rdd)
-
-  // Add methods specific to ADAMVariantContext RDDs
-  implicit def rddToAdamVariantContextRDD(rdd: RDD[ADAMVariantContext]) = new AdamVariantContextRDDFunctions(rdd)
-
   // Add methods specific to the ADAMRod RDDs
   implicit def rddToAdamRodRDD(rdd: RDD[ADAMRod]) = new AdamRodRDDFunctions(rdd)
 
   // Add generic RDD methods for all types of ADAM RDDs
   implicit def rddToAdamRDD[T <% SpecificRecord : Manifest](rdd: RDD[T]) = new AdamRDDFunctions(rdd)
+
+  // Add methods specific to the ADAMNucleotideContig RDDs
+  implicit def rddToAdamRDD(rdd: RDD[ADAMNucleotideContig]) = new AdamNucleotideContigRDDFunctions(rdd)
 
   // Add implicits for the rich adam objects
   implicit def recordToRichRecord(record: ADAMRecord): RichADAMRecord = new RichADAMRecord(record)
@@ -89,6 +92,54 @@ object AdamContext {
   implicit def mapToJavaMap[A, B](map: Map[A, B]): java.util.Map[A, B] = mapAsJavaMap(map)
 
   implicit def iterableToJavaCollection[A](i: Iterable[A]): java.util.Collection[A] = asJavaCollection(i)
+
+  implicit def setToJavaSet[A](set: Set[A]): java.util.Set[A] = setAsJavaSet(set)
+
+  /**
+   * Creates a SparkContext that is configured for use with ADAM. Applies default serialization
+   * settings.
+   *
+   * @param name Context name.
+   * @param master URL for master.
+   * @param sparkHome Path to Spark.
+   * @param sparkJars JAR files to import into context.
+   * @param sparkEnvVars Environment variables to set.
+   * @param sparkAddStatsListener Disabled by default; true enables. If enabled, a job status
+   *                              listener is registered. This can be useful for performance debug.
+   * @param sparkKryoBufferSize Size of the object serialization buffer. Default setting is 4MB.
+   * @return Returns a properly configured Spark Context.
+   */
+  def createSparkContext(name: String,
+                         master: String,
+                         sparkHome: String,
+                         sparkJars: Seq[String],
+                         sparkEnvVars: Seq[String],
+                         sparkAddStatsListener: Boolean = false,
+                         sparkKryoBufferSize: Int = 4): SparkContext = {
+    AdamKryoProperties.setupContextProperties(sparkKryoBufferSize)
+    val appName = "adam: " + name
+    val environment: Map[String, String] = if (sparkEnvVars.isEmpty) {
+      Map()
+    } else {
+      sparkEnvVars.map {
+        kv =>
+          val kvSplit = kv.split("=")
+          if (kvSplit.size != 2) {
+            throw new IllegalArgumentException("Env variables should be key=value syntax, e.g. -spark_env foo=bar")
+          }
+          (kvSplit(0), kvSplit(1))
+      }.toMap
+    }
+
+    val jars: Seq[String] = if (sparkJars.isEmpty) Nil else sparkJars
+    val sc = new SparkContext(master, appName, sparkHome, jars, environment)
+
+    if (sparkAddStatsListener) {
+      sc.addSparkListener(new StatsReportListener)
+    }
+
+    sc
+  }
 }
 
 class AdamContext(sc: SparkContext) extends Serializable with Logging {
@@ -106,6 +157,7 @@ class AdamContext(sc: SparkContext) extends Serializable with Logging {
   private def adamBamLoadReadGroups(samHeader : SAMFileHeader) : RecordGroupDictionary = {
     RecordGroupDictionary.fromSAMHeader(samHeader)
   }
+
 
   private def adamBamLoad(filePath: String): RDD[ADAMRecord] = {
     log.info("Reading legacy BAM file format %s to create RDD".format(filePath))
@@ -166,9 +218,10 @@ class AdamContext(sc: SparkContext) extends Serializable with Logging {
     // other flattened schema, and (b) because the SequenceRecord.fromADAMRecord, below, is going
     // to be called through a flatMap rather than through a map tranformation on the underlying record RDD.
     val isAdamRecord = classOf[ADAMRecord].isAssignableFrom(manifest[T].erasure)
-
+    val isAdamContig = classOf[ADAMNucleotideContig].isAssignableFrom(manifest[T].erasure)
+    
     val projection =
-      if (isAdamRecord)
+      if (isAdamRecord) {
         Projection(
           ADAMRecordField.referenceId,
           ADAMRecordField.referenceName,
@@ -183,12 +236,18 @@ class AdamContext(sc: SparkContext) extends Serializable with Logging {
           ADAMRecordField.readMapped,
           ADAMRecordField.mateMapped
         )
-      else
+      } else if (isAdamContig) {
+        Projection(ADAMNucleotideContigField.contigName,
+                   ADAMNucleotideContigField.contigId,
+                   ADAMNucleotideContigField.sequenceLength,
+                   ADAMNucleotideContigField.url)
+      } else {
         Projection(
           ADAMRecordField.referenceId,
           ADAMRecordField.referenceName,
           ADAMRecordField.referenceLength,
           ADAMRecordField.referenceUrl)
+      }
 
     if (filePath.endsWith(".bam") || filePath.endsWith(".sam")) {
       if (isAdamRecord)
@@ -200,83 +259,19 @@ class AdamContext(sc: SparkContext) extends Serializable with Logging {
       val projected: RDD[T] = adamParquetLoad[T, UnboundRecordFilter](filePath, None, projection = Some(projection))
 
       val recs: RDD[SequenceRecord] =
-        if (isAdamRecord)
+        if (isAdamRecord) {
           projected.asInstanceOf[RDD[ADAMRecord]].distinct().flatMap(rec => SequenceRecord.fromADAMRecord(rec))
-        else
+        } else if (isAdamContig) {
+          projected.asInstanceOf[RDD[ADAMNucleotideContig]].distinct().map(ctg => SequenceRecord.fromADAMContig(ctg))
+        } else {
           projected.distinct().map(SequenceRecord.fromSpecificRecord(_))
+        }
 
       val dict = recs.aggregate(SequenceDictionary())(
         (dict: SequenceDictionary, rec: SequenceRecord) => dict + rec,
         (dict1: SequenceDictionary, dict2: SequenceDictionary) => dict1 ++ dict2)
 
       dict
-    }
-  }
-
-  /**
-   * Loads a VCF file and converts the Variant contexts in the file into ADAM format.
-   *
-   * @param filePath Path to the VCF file.
-   * @return Returns an RDD containing ADAM variant contexts.
-   */
-  private def adamVcfLoad(filePath: String): RDD[ADAMVariantContext] = {
-    log.info("Reading legacy VCF file format %s to create RDD".format(filePath))
-    val job = new Job(sc.hadoopConfiguration)
-    val records = sc.newAPIHadoopFile(filePath, classOf[VCFInputFormat], classOf[LongWritable],
-      classOf[VariantContextWritable], ContextUtil.getConfiguration(job))
-      .map(_._2)
-      .filter(_ != null)
-
-    val vcfRecordConverter = new VariantContextConverter
-    records.map(vcfRecordConverter.convert)
-  }
-
-  /**
-   * Loads an RDD of ADAM variant contexts from an input. This input can take two forms:
-   * - A VCF/BCF file
-   * - A collection of ADAM variant/genotype/annotation files
-   *
-   * @param filePath Path to the file to load.
-   * @param variantPredicate Predicate to apply to variants.
-   * @param genotypePredicate Predicate to apply to genotypes.
-   * @param variantProjection Projection to apply to variants.
-   * @param genotypeProjection Projection to apply to genotypes.
-   * @return An RDD containing ADAM variant contexts.
-   */
-  def adamVariantContextLoad[U <: UnboundRecordFilter, V <: UnboundRecordFilter](filePath: String,
-                                                                                 variantPredicate: Option[Class[U]] = None,
-                                                                                 genotypePredicate: Option[Class[V]] = None,
-                                                                                 variantProjection: Option[Schema] = None,
-                                                                                 genotypeProjection: Option[Schema] = None,
-                                                                                 annotationProjection: Map[ADAMVariantAnnotations.Value, Option[Schema]] = Map[ADAMVariantAnnotations.Value, Option[Schema]]()
-                                                                                  ): RDD[ADAMVariantContext] = {
-    if (filePath.endsWith(".vcf") || filePath.endsWith(".bcf")) {
-      if (variantPredicate.isDefined || genotypePredicate.isDefined) {
-        log.warn("Predicate is ignored when loading a VCF file.")
-      }
-      if (variantProjection.isDefined || genotypeProjection.isDefined) {
-        log.warn("Projection is ignored when loading a VCF file.")
-      }
-
-      adamVcfLoad(filePath)
-    } else {
-      log.info("Reading variants.")
-      val variants: RDD[ADAMVariant] = adamLoad(filePath + ".v", variantPredicate, variantProjection)
-
-      log.info("Reading genotypes.")
-      val genotypes: RDD[ADAMGenotype] = adamLoad(filePath + ".g", genotypePredicate, genotypeProjection)
-
-      val domains: Option[RDD[ADAMVariantDomain]] = if (annotationProjection.contains(ADAMVariantAnnotations.ADAMVariantDomain)) {
-        val domainProjection = annotationProjection(ADAMVariantAnnotations.ADAMVariantDomain)
-        val fileExtension = ADAMVariantAnnotations.fileExtensions(ADAMVariantAnnotations.ADAMVariantDomain)
-
-        Some(adamLoad(filePath + fileExtension, projection = domainProjection))
-      } else {
-        None
-      }
-
-      log.info("Merging variant and genotype data.")
-      ADAMVariantContext.mergeVariantsAndGenotypes(variants, genotypes, domains)
     }
   }
 

@@ -21,6 +21,8 @@ import scala.Some
 object AdamMain extends Logging {
 
   private val commands = List(Transform,
+    PrintTags,
+    CalculateDepth,
     FlagStat,
     Reads2Ref,
     MpileupCommand,
@@ -28,11 +30,16 @@ object AdamMain extends Logging {
     PileupAggregator,
     ListDict,
     CompareAdam,
-    ComputeVariants,
+    /* TODO (nealsid): Reimplement in terms of new schema
+    ComputeVariants, 
+     */
     Bam2Adam,
     Adam2Vcf,
     Vcf2Adam,
-    FindReads)
+    FindReads,
+    Fasta2Adam,
+    PluginExecutor,
+    BuildInformation)
 
   private def printCommands() {
     println("\n")

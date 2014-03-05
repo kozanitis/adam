@@ -21,6 +21,7 @@ import java.util
 import scala.collection.JavaConversions._
 import org.apache.spark.SparkContext
 import edu.berkeley.cs.amplab.adam.serialization.AdamKryoProperties
+import edu.berkeley.cs.amplab.adam.rdd.AdamContext
 
 trait SparkArgs extends Args4jBase {
   @Args4jOption(required = false, name = "-spark_master", usage = "Spark Master (default = \"local[#cores]\")")
@@ -31,28 +32,23 @@ trait SparkArgs extends Args4jBase {
   var spark_jars = new util.ArrayList[String]()
   @Args4jOption(required = false, name = "-spark_env", metaVar = "KEY=VALUE", usage = "Add Spark environment variable")
   var spark_env_vars = new util.ArrayList[String]()
+  @Args4jOption(required = false, name = "-spark_kryo_buffer_size", usage = "Set the size of the buffer used for serialization in MB. Default size is 4MB.")
+  var spark_kryo_buffer_size = 4
+  @Args4jOption(required = false, name = "-spark_add_stats_listener", usage = "Register job stat reporter, which is useful for debug/profiling.")
+  var spark_add_stats_listener = false
 }
 
 trait SparkCommand extends AdamCommand {
 
   def createSparkContext(args: SparkArgs): SparkContext = {
-    AdamKryoProperties.setupContextProperties()
-    val appName = "adam: " + companion.commandName
-    val environment: Map[String, String] = if (args.spark_env_vars.isEmpty) {
-      Map()
-    } else {
-      args.spark_env_vars.map {
-        kv =>
-          val kvSplit = kv.split("=")
-          if (kvSplit.size != 2) {
-            throw new IllegalArgumentException("Env variables should be key=value syntax, e.g. -spark_env foo=bar")
-          }
-          (kvSplit(0), kvSplit(1))
-      }.toMap
-    }
-
-    val jars: Seq[String] = if (args.spark_jars.isEmpty) Nil else args.spark_jars
-    new SparkContext(args.spark_master, appName, args.spark_home, jars, environment)
+    AdamContext.createSparkContext(
+      companion.commandName,
+      args.spark_master,
+      args.spark_home,
+      args.spark_jars,
+      args.spark_env_vars,
+      args.spark_add_stats_listener,
+      args.spark_kryo_buffer_size)
   }
 
 }
