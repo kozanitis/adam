@@ -36,6 +36,7 @@ object ADAMMain extends Logging {
         CountKmers,
         PileupAggregator,
         Transform,
+        JoinBed,
         /* TODO (nealsid): Reimplement in terms of new schema
 	  ComputeVariants
 	*/
