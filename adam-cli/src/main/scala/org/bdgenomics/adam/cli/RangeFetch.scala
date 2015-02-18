@@ -35,13 +35,13 @@ class RangeFetch(protected val args: RangeFetchArgs) extends ADAMSparkCommand[Ra
 
   val companion: ADAMCommandCompanion = RangeFetch
 
-  val filterGen = (a: String, b: Long, c: Long) => (read: AlignmentRecord) => read.getContig.getContigName.toString.equals(a) && read.getStart >= b && read.getStart <= c
+  val filterGen = (a: String, b: Long, c: Long) => (read: AlignmentRecord) => read.getContig != null && read.getContig.getContigName.toString.equals(a) && read.getStart != null && read.getStart >= b && read.getStart <= c
 
   def run(sc: SparkContext, job: Job) = {
 
     val adamRDD: RDD[AlignmentRecord] = sc.loadAlignments(args.input1)
 
-    val reads: RDD[AlignmentRecord] = (adamRDD).filter(filterGen(args.input2, args.input3, args.input4))
+    val reads: RDD[AlignmentRecord] = adamRDD.filter(filterGen(args.input2, args.input3, args.input4))
 
     reads.collect.foreach(println)
 
