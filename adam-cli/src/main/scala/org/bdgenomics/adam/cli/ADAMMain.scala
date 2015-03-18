@@ -57,6 +57,7 @@ object ADAMMain extends Logging {
           Reads2Ref,
           MpileupCommand,
           Features2ADAM,
+          SplitColumns,
           WigFix2Bed
         )
       ),
@@ -72,6 +73,7 @@ object ADAMMain extends Logging {
           SummarizeGenotypes,
           AlleleCount,
           BuildInformation,
+          PrintVariantLoc,
           View
         )
       )
