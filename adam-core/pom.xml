@@ -12,6 +12,26 @@
   <name>ADAM: Core</name>
   <build>
     <plugins>
+        <!-- compile avro resources -->
+      <plugin>
+        <groupId>org.apache.avro</groupId>
+        <artifactId>avro-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>schemas</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>schema</goal>
+              <goal>protocol</goal>
+              <goal>idl-protocol</goal>
+             </goals>
+             <configuration>
+               <sourceDirectory>../adam-core/src/main/resources/avro</sourceDirectory>
+                 <fieldVisibility>PUBLIC</fieldVisibility>
+              </configuration>
+          </execution>
+        </executions>
+      </plugin>
       <!-- disable surefire -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>

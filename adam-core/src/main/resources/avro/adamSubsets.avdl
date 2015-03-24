@@ -1,0 +1,23 @@
+@namespace("org.bdgenomics.adam.core")
+
+protocol ADAMSUBSETS {
+    record CoordinateSubset{
+        union { null, string } readName = null;
+        union { null, string } chromosome = null;
+        union { null, long } start = 0;
+        union { null, long } end = 0;
+        union { null, string } cigar = null;
+        union { null, int } mapq = 0;
+        union { null, boolean } firstOfPair = false;
+      }
+
+      record PileupSubset{
+        union { null, string } readName = null;
+        union { null, string } chromosome = null;
+        union { null, long } position = 0;
+        union { null, int } mapq = 0;
+        union { null, string } readBase = null;
+        union { null, boolean } isReverseStrand = false;
+      }
+
+}
